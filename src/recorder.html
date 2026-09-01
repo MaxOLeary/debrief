@@ -1,0 +1,146 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Debrief recorder</title>
+<body></body>
+<script>
+'use strict'
+// This page is never shown. It exists because audio capture lives in the
+// renderer process — the main process can't call getUserMedia itself.
+
+let mediaRecorder = null
+let audioContext = null
+let liveStreams = []
+let meterTimer = null
+
+const log = (m) => window.recorder.send('recorder:log', String(m))
+const fail = (m) => window.recorder.send('recorder:error', String(m))
+
+async function getSystemAudio (keepVideoTrack) {
+  // On macOS the only sanctioned route to system audio is the screen-capture
+  // API: main.js answers this request with { audio: 'loopback' }.
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: { width: { max: 320 }, height: { max: 240 }, frameRate: { max: 1 } },
+    audio: true
+  })
+  if (!keepVideoTrack) {
+    // We only ever wanted the audio. Dropping the video track stops macOS
+    // from burning CPU compositing frames nobody looks at.
+    for (const t of stream.getVideoTracks()) t.stop()
+  }
+  if (stream.getAudioTracks().length === 0) {
+    throw new Error('screen capture returned no audio track')
+  }
+  return stream
+}
+
+async function start (opts) {
+  try {
+    let micStream = null
+    let sysStream = null
+    const warnings = []
+
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,   // we WANT the other side recorded cleanly
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      })
+    } catch (e) {
+      warnings.push(`microphone unavailable (${e.name}: ${e.message})`)
+    }
+
+    if (opts.systemAudio) {
+      try {
+        sysStream = await getSystemAudio(opts.keepVideoTrack)
+      } catch (e) {
+        warnings.push(`system audio unavailable (${e.name}: ${e.message})`)
+      }
+    }
+
+    if (!micStream && !sysStream) {
+      throw new Error('No audio sources at all. ' + warnings.join('; '))
+    }
+
+    liveStreams = [micStream, sysStream].filter(Boolean)
+
+    // Mic on the left channel, everything the Mac played on the right.
+    // whisper.cpp reads that split back out as two speakers.
+    audioContext = new AudioContext({ sampleRate: 48000 })
+    const merger = audioContext.createChannelMerger(2)
+
+    if (micStream) {
+      const g = audioContext.createGain()
+      g.gain.value = opts.micGain
+      audioContext.createMediaStreamSource(micStream).connect(g)
+      g.connect(merger, 0, 0)
+    }
+    if (sysStream) {
+      const g = audioContext.createGain()
+      g.gain.value = opts.systemGain
+      audioContext.createMediaStreamSource(new MediaStream(sysStream.getAudioTracks())).connect(g)
+      g.connect(merger, 0, 1)
+    }
+
+    const dest = audioContext.createMediaStreamDestination()
+    merger.connect(dest)
+
+    // Live level for the visualizer card. Metered off the merged mix, so the
+    // wave moves for your voice AND for whatever the far side is saying.
+    const analyser = audioContext.createAnalyser()
+    analyser.fftSize = 1024
+    merger.connect(analyser)
+    const samples = new Float32Array(analyser.fftSize)
+    meterTimer = setInterval(() => {
+      analyser.getFloatTimeDomainData(samples)
+      let sum = 0
+      for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i]
+      // RMS scaled so normal speech lands mid-card, like UltraWhisper's meter.
+      const level = Math.min(1, Math.sqrt(sum / samples.length) * 6)
+      window.recorder.send('recorder:level', level)
+    }, 33)
+
+    // AAC in an MP4 container: macOS can read it natively (afconvert), so no
+    // ffmpeg is needed, and the file doubles as the keeper copy of the meeting.
+    mediaRecorder = new MediaRecorder(dest.stream, {
+      mimeType: 'audio/mp4;codecs=mp4a.40.2',
+      audioBitsPerSecond: 96000 // ~43 MB/hour; enough that the two channels stay distinct
+    })
+
+    mediaRecorder.ondataavailable = async (e) => {
+      if (!e.data || e.data.size === 0) return
+      const buf = new Uint8Array(await e.data.arrayBuffer())
+      await window.recorder.chunk(buf)
+    }
+    mediaRecorder.onerror = (e) => fail(`MediaRecorder error: ${e.error && e.error.name}`)
+    mediaRecorder.onstop = () => {
+      if (meterTimer) { clearInterval(meterTimer); meterTimer = null }
+      for (const s of liveStreams) for (const t of s.getTracks()) t.stop()
+      liveStreams = []
+      if (audioContext) { audioContext.close(); audioContext = null }
+      window.recorder.send('recorder:stopped')
+    }
+
+    // Flush to disk every 3 seconds so a crash costs 3 seconds, not the meeting.
+    mediaRecorder.start(3000)
+
+    window.recorder.send('recorder:started', {
+      mic: Boolean(micStream),
+      system: Boolean(sysStream),
+      warnings
+    })
+  } catch (e) {
+    fail(e.message || String(e))
+  }
+}
+
+function stop () {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop()
+  else window.recorder.send('recorder:stopped')
+}
+
+window.recorder.onStart(start)
+window.recorder.onStop(stop)
+window.recorder.send('recorder:ready')
+</script>

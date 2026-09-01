@@ -1,0 +1,22 @@
+{
+  "name": "debrief",
+  "version": "1.0.0",
+  "description": "Local menu-bar meeting recorder: system audio + mic -> whisper -> LLM notes. No accounts, no cloud storage, no telemetry.",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "icon": "node scripts/make-icon.js",
+    "postinstall": "node scripts/make-icon.js",
+    "setup": "bash scripts/setup.sh",
+    "fetch-model": "bash scripts/fetch-model.sh",
+    "fetch-llm": "node scripts/fetch-llm.js",
+    "selftest": "electron . --selftest 14"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0"
+  }
+}

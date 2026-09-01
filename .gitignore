@@ -1,0 +1,10 @@
+node_modules/
+models/
+.impeccable/
+sketchybar/icon/DebriefIcons.ttf
+.env
+*.log
+*.gguf
+.lavish/
+.DS_Store
+.venv/

@@ -1,0 +1,237 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Debrief visualizer</title>
+<style>
+  /* The window is transparent; the card floats inside it with a CSS shadow
+     (native shadows ghost on transparent Electron windows when the canvas
+     repaints). Same geometry as UltraWhisper's card: 428x120, radius 18. */
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
+               font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+               -webkit-user-select: none; user-select: none; }
+  #card {
+    position: absolute; left: 12px; top: 12px; width: 428px; height: 120px;
+    border-radius: 18px;
+    background: rgba(22, 22, 24, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+    box-sizing: border-box;
+    -webkit-app-region: drag;          /* grab anywhere on the card and drag */
+  }
+  #wave { position: absolute; left: 24px; top: 14px; width: 380px; height: 62px; }
+  #prompt {
+    position: absolute; left: 0; top: 26px; width: 100%; text-align: center;
+    color: rgba(255, 255, 255, 0.9); font-size: 15px; font-weight: 500;
+    display: none; -webkit-app-region: no-drag; cursor: pointer;
+  }
+  #done {
+    position: absolute; left: 24px; right: 24px; top: 32px; text-align: center;
+    color: rgba(255, 255, 255, 0.92); font-size: 13.5px; display: none;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #footer {
+    position: absolute; left: 24px; right: 24px; bottom: 10px; height: 22px;
+    display: flex; align-items: center; font-size: 13px; font-weight: 500;
+    color: rgba(255, 255, 255, 0.45);
+  }
+  #footer.dim { color: rgba(255, 255, 255, 0.28); }
+  #footerLeft { display: flex; align-items: center; gap: 8px; min-width: 0;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #footerLeft svg { flex: none; opacity: 0.9; }
+  #footerRight { margin-left: auto; display: flex; align-items: center; gap: 5px; }
+  .flabel { -webkit-app-region: no-drag; cursor: pointer; background: none; border: none;
+            font: inherit; color: inherit; padding: 0 2px; margin-left: 13px; }
+  .flabel:hover { color: rgba(255, 255, 255, 0.85); }
+  .keycap {
+    display: inline-block; padding: 2px 7px 3px; border-radius: 5px;
+    background: rgba(255, 255, 255, 0.13); color: rgba(255, 255, 255, 0.9);
+    font-size: 12px; font-weight: 600;
+  }
+  #footer.dim .keycap { color: rgba(255, 255, 255, 0.55); }
+  .keycap.inline { -webkit-app-region: no-drag; cursor: pointer; }
+</style>
+<body>
+<div id="card">
+  <canvas id="wave"></canvas>
+  <div id="prompt">Discard recording? <span class="keycap inline">↩</span></div>
+  <div id="done"></div>
+  <div id="footer">
+    <span id="footerLeft">
+      <svg width="12" height="14" viewBox="0 0 12 14" fill="rgba(255,255,255,0.45)">
+        <rect x="3.75" y="0.5" width="4.5" height="8" rx="2.25"/>
+        <path d="M1 6.5v0.75a5 5 0 0 0 10 0V6.5" fill="none"
+              stroke="rgba(255,255,255,0.45)" stroke-width="1.4" stroke-linecap="round"/>
+        <line x1="6" y1="12" x2="6" y2="13.5" stroke="rgba(255,255,255,0.45)"
+              stroke-width="1.4" stroke-linecap="round"/>
+      </svg>
+      <span id="footerText">Debrief</span>
+    </span>
+    <span id="footerRight"></span>
+  </div>
+</div>
+<script>
+'use strict'
+// A faithful port of UltraWhisper's WaveView: a ticker of thin bars mirrored
+// around the centerline while recording (silence reads as a dotted line), and
+// a soft breathing spindle while the pipeline works.
+
+const canvas = document.getElementById('wave')
+const promptEl = document.getElementById('prompt')
+const doneEl = document.getElementById('done')
+const footer = document.getElementById('footer')
+const footerText = document.getElementById('footerText')
+const footerRight = document.getElementById('footerRight')
+
+const PITCH = 3, BAR_W = 1.5
+const dpr = window.devicePixelRatio || 1
+canvas.width = canvas.clientWidth * dpr
+canvas.height = canvas.clientHeight * dpr
+const ctx = canvas.getContext('2d')
+ctx.scale(dpr, dpr)
+const W = canvas.clientWidth
+const H = canvas.clientHeight
+const SLOTS = Math.max(2, Math.floor(W / PITCH))
+
+let mode = 'wave'          // wave | discard | busy | done
+let hotkeyCaps = ['⌘', '⇧', 'R']
+let currentLevel = 0
+let smoothLevel = 0
+let bars = []
+let ticks = 0
+let phase = 0
+let raf = null
+
+function keycapsFor (hotkey) {
+  const map = { command: '⌘', cmd: '⌘', meta: '⌘', alt: '⌥', option: '⌥', shift: '⇧', control: '⌃', ctrl: '⌃', space: 'Space' }
+  return String(hotkey || '').split('+').filter(Boolean)
+    .map(t => map[t.toLowerCase()] || (t.length === 1 ? t.toUpperCase() : t))
+}
+
+function setFooterRight (items) {
+  // items: array of { label } or { cap } or { label, action } / { cap, action }
+  footerRight.textContent = ''
+  for (const it of items) {
+    let el
+    if (it.cap !== undefined) {
+      el = document.createElement('span')
+      el.className = 'keycap' + (it.action ? ' inline' : '')
+      el.textContent = it.cap
+    } else {
+      el = document.createElement('button')
+      el.className = 'flabel'
+      el.textContent = it.label
+    }
+    if (it.action) el.addEventListener('click', it.action)
+    footerRight.appendChild(el)
+  }
+}
+
+const doStop = () => window.panel.send('panel:stop')
+const doDiscard = () => window.panel.send('panel:discard')
+const doHide = () => window.panel.send('panel:hide')
+const showPrompt = () => setMode('discard')
+const backToWave = () => setMode('wave')
+
+function setMode (m, opts = {}) {
+  mode = m
+  promptEl.style.display = m === 'discard' ? 'block' : 'none'
+  doneEl.style.display = m === 'done' ? 'block' : 'none'
+  canvas.style.display = (m === 'wave' || m === 'busy') ? 'block' : 'none'
+  footer.className = m === 'busy' ? 'dim' : ''
+
+  if (m === 'wave') {
+    footerText.textContent = 'Debrief'
+    setFooterRight([
+      { label: 'Stop', action: doStop },
+      ...hotkeyCaps.map(c => ({ cap: c })),
+      { label: 'Cancel', action: showPrompt },
+      { cap: 'esc', action: showPrompt }
+    ])
+  } else if (m === 'discard') {
+    footerText.textContent = 'Debrief'
+    setFooterRight([
+      { label: 'Stop', action: doStop },
+      ...hotkeyCaps.map(c => ({ cap: c })),
+      { label: 'Continue', action: backToWave },
+      { cap: 'esc', action: backToWave }
+    ])
+  } else if (m === 'busy') {
+    footerText.textContent = opts.detail || 'Working…'
+    setFooterRight([{ label: 'Hide', action: doHide }, { cap: 'esc', action: doHide }])
+  } else if (m === 'done') {
+    footerText.textContent = 'Debrief'
+    doneEl.textContent = opts.text || 'Note saved'
+    setFooterRight([{ label: 'Close', action: doHide }, { cap: 'esc', action: doHide }])
+  }
+}
+
+function draw () {
+  ctx.clearRect(0, 0, W, H)
+  const levels = new Array(SLOTS).fill(0)
+
+  if (mode === 'wave') {
+    smoothLevel += (currentLevel - smoothLevel) * (currentLevel > smoothLevel ? 0.35 : 0.12)
+    ticks++
+    if (ticks % 5 === 0) {           // a new bar lands every ~80ms at 60fps
+      bars.push(Math.min(1, Math.pow(smoothLevel * 1.35, 0.9)))
+      if (bars.length > SLOTS) bars = bars.slice(bars.length - SLOTS)
+    }
+    const recent = bars.slice(-(SLOTS - 1))
+    const start = SLOTS - 1 - recent.length
+    for (let i = 0; i < recent.length; i++) levels[start + i] = recent[i]
+    levels[SLOTS - 1] = Math.min(1, Math.pow(smoothLevel * 1.35, 0.9))
+  } else if (mode === 'busy') {
+    phase += 1 / 30
+    const c = 0.5 + 0.10 * Math.sin(phase * 1.9)
+    const w = 0.20 + 0.05 * Math.sin(phase * 2.7 + 1)
+    for (let i = 0; i < SLOTS; i++) {
+      const d = (i / (SLOTS - 1) - c) / w
+      levels[i] = 0.62 * Math.exp(-d * d)
+    }
+  }
+
+  const mid = H / 2
+  const totalW = SLOTS * PITCH - (PITCH - BAR_W)
+  const x0 = W / 2 - totalW / 2
+  for (let i = 0; i < SLOTS; i++) {
+    const lv = levels[i]
+    const h = Math.max(1.6, lv * H)
+    const alpha = h <= 1.6 ? 0.30
+      : mode === 'busy' ? 0.65
+      : 0.40 + 0.60 * Math.min(1, lv * 1.5)
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`
+    roundRect(x0 + i * PITCH, mid - h / 2, BAR_W, h, BAR_W / 2)
+  }
+  raf = requestAnimationFrame(draw)
+}
+
+function roundRect (x, y, w, h, r) {
+  ctx.beginPath()
+  ctx.roundRect(x, y, w, h, r)
+  ctx.fill()
+}
+
+// ── Wiring ──────────────────────────────────────────────────────────────────
+window.panel.onLevel((v) => { currentLevel = v })
+
+window.panel.onState((s) => {
+  if (s.hotkey !== undefined) hotkeyCaps = keycapsFor(s.hotkey)
+  if (s.mode === 'wave') { bars = []; smoothLevel = 0; currentLevel = 0; ticks = 0; phase = 0 }
+  setMode(s.mode, s)
+})
+
+promptEl.addEventListener('click', doDiscard)
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (mode === 'wave') showPrompt()
+    else if (mode === 'discard') backToWave()
+    else doHide()
+  } else if (e.key === 'Enter' && mode === 'discard') {
+    doDiscard()
+  }
+})
+
+setMode('wave')
+draw()
+</script>
+</body>
