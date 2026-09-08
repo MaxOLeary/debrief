@@ -13,11 +13,19 @@
   #card {
     position: absolute; left: 12px; top: 12px; width: 428px; height: 120px;
     border-radius: 32px;
-    background: rgba(22, 22, 24, 0.88);
-    border: 1px solid rgba(255, 255, 255, 0.09);
     box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
     box-sizing: border-box;
     -webkit-app-region: drag;          /* grab anywhere on the card and drag */
+  }
+  /* Inner clip so the wave can't paint through the 32px corners. Overflow
+     can't live on #card: that would clip the drop shadow too. */
+  #clip {
+    position: absolute; inset: 0;
+    border-radius: 32px;
+    overflow: hidden;
+    background: rgba(22, 22, 24, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-sizing: border-box;
   }
   #wave { position: absolute; left: 24px; top: 14px; width: 380px; height: 62px; }
   #prompt {
@@ -53,6 +61,7 @@
 </style>
 <body>
 <div id="card">
+<div id="clip">
   <canvas id="wave"></canvas>
   <div id="prompt">Discard recording? <span class="keycap inline">↩</span></div>
   <div id="done"></div>
@@ -69,6 +78,7 @@
     </span>
     <span id="footerRight"></span>
   </div>
+</div>
 </div>
 <script>
 'use strict'
