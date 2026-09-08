@@ -4,13 +4,15 @@
 <style>
   /* The window is transparent; the card floats inside it with a CSS shadow
      (native shadows ghost on transparent Electron windows when the canvas
-     repaints). Same geometry as UltraWhisper's card: 428x120, radius 18. */
+     repaints). Same geometry as UltraWhisper's card: 428x120, radius 32.
+     UltraWhisper frosts the card with a system blur; Electron can't clip
+     that blur to a 32px corner, so this card is a plain dark wash. */
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
                font-family: -apple-system, BlinkMacSystemFont, sans-serif;
                -webkit-user-select: none; user-select: none; }
   #card {
     position: absolute; left: 12px; top: 12px; width: 428px; height: 120px;
-    border-radius: 18px;
+    border-radius: 32px;
     background: rgba(22, 22, 24, 0.88);
     border: 1px solid rgba(255, 255, 255, 0.09);
     box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);

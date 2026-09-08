@@ -4,6 +4,7 @@
 // if you skip it. Usage: node scripts/fetch-llm.js [qwen3-4b|qwen2.5-3b|llama3.2-3b]
 const cfgLib = require('../src/lib/config')
 const localllm = require('../src/lib/localllm')
+const { progressLabel } = require('../src/lib/localengine')
 
 async function main () {
   const cfg = cfgLib.load()
@@ -11,11 +12,10 @@ async function main () {
   const s = localllm.status(cfg)
   if (s.ready) { console.log(`Already installed: ${s.model.label}\n  ${s.server}\n  ${s.model.path}`); return }
   let last = ''
-  await localllm.ensure(cfg, (prog) => {
-    const label = localllm.progressLabel(prog)
+  const done = await localllm.ensure(cfg, (prog) => {
+    const label = progressLabel(prog)
     if (label !== last) { last = label; process.stdout.write(`\r  ${label}          `) }
   })
-  const done = localllm.status(cfg)
   console.log(`\nInstalled ${done.model.label}\n  ${done.server}\n  ${done.model.path}`)
 }
 main().catch(e => { console.error('\n' + e.message); process.exit(1) })

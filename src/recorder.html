@@ -66,7 +66,7 @@ async function start (opts) {
     liveStreams = [micStream, sysStream].filter(Boolean)
 
     // Mic on the left channel, everything the Mac played on the right.
-    // whisper.cpp reads that split back out as two speakers.
+    // The transcriber reads that split back out as two speakers.
     audioContext = new AudioContext({ sampleRate: 48000 })
     const merger = audioContext.createChannelMerger(2)
 

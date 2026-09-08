@@ -21,7 +21,7 @@ async function main () {
   const wav = path.join(tmp, 'a.wav')
 
   console.time('convert')
-  await audio.toWhisperWav(input, wav)
+  await audio.to16kWav(input, wav)
   console.timeEnd('convert')
 
   fs.mkdirSync(cfg.notesDir, { recursive: true })
@@ -32,7 +32,7 @@ async function main () {
 
   console.time('transcribe')
   const { segments, engine } = await transcribeLib.transcribe(cfg, { wavPath: wav, webmPath: slot.audio },
-    p => process.stdout.write(`\r  transcribing ${p}%   `))
+    text => process.stdout.write(`\r  ${text}   `))
   console.log('')
   console.timeEnd('transcribe')
 

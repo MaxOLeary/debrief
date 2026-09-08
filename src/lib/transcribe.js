@@ -3,6 +3,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const audio = require('./audio')
+const parakeet = require('./parakeet')
 
 const MAX_UPLOAD_BYTES = 24 * 1024 * 1024 // API limit is 25 MB; leave headroom.
 
@@ -12,42 +13,6 @@ function hhmmss (ms) {
   const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
   const sec = String(s % 60).padStart(2, '0')
   return `${h}:${m}:${sec}`
-}
-
-// ── Local: whisper.cpp ──────────────────────────────────────────────────────
-async function localWhisper (cfg, wavPath, onProgress) {
-  const outBase = path.join(path.dirname(wavPath), 'transcript')
-  const args = [
-    '-m', cfg.whisperModel,
-    '-f', wavPath,
-    '-t', String(cfg.whisperThreads),
-    '-l', cfg.whisperLanguage,
-    '-di',            // stereo diarisation: left channel = you, right = them
-    '-sns',           // suppress non-speech tokens: silence invents dialogue otherwise
-    '-oj',            // structured JSON, far safer to parse than stdout
-    '-of', outBase,
-    '-pp',            // print progress so the menu bar can show a percentage
-    '-np'
-  ]
-  // Voice activity detection: only feed whisper the parts that contain speech.
-  if (cfg.vadModel) args.push('--vad', '-vm', cfg.vadModel)
-  await audio.run(cfg.whisperBin, args, {
-    onStderr: (chunk) => {
-      const m = [...chunk.matchAll(/progress\s*=\s*(\d+)%/g)].pop()
-      if (m && onProgress) onProgress(parseInt(m[1], 10))
-    }
-  })
-
-  const jsonPath = `${outBase}.json`
-  const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'))
-  const segments = (data.transcription || []).map(seg => ({
-    from: seg.offsets ? seg.offsets.from : 0,
-    to: seg.offsets ? seg.offsets.to : 0,
-    speaker: seg.speaker === undefined ? null : String(seg.speaker),
-    text: (seg.text || '').trim()
-  })).filter(s => s.text)
-
-  return { segments, engine: `whisper.cpp (${path.basename(cfg.whisperModel)})` }
 }
 
 // ── Remote: OpenAI or Groq Whisper ──────────────────────────────────────────
@@ -104,7 +69,7 @@ async function apiWhisper (cfg, sourcePath, onProgress) {
     let offsetMs = 0
     for (let i = 0; i < parts.length; i++) {
       if (onProgress) onProgress(Math.round((i / parts.length) * 100))
-      const json = await postOneFile(target, parts[i], cfg.whisperLanguage)
+      const json = await postOneFile(target, parts[i], cfg.transcribeLanguage)
       const segs = json.segments || []
       if (segs.length) {
         for (const s of segs) {
@@ -130,9 +95,10 @@ async function apiWhisper (cfg, sourcePath, onProgress) {
 }
 
 // ── Junk filter ─────────────────────────────────────────────────────────────
-// Even with VAD, whisper emits garbage on near-silence: long runs of one
-// letter, whisper's own [BLANK_AUDIO] marker, and looped repeats of a single
-// phrase. None of that belongs in a meeting note, and it derails the summary.
+// Speech models emit garbage on near-silence now and then: long runs of one
+// letter, whisper-style [BLANK_AUDIO] markers, looped repeats of a phrase.
+// Parakeet only ever sees gated speech so this rarely fires, but the cloud
+// route still needs it, and it costs nothing.
 const BOILERPLATE = [
   /^\[?blank_?audio\]?$/i,
   /^\(?(silence|music|applause|laughter|inaudible|no speech)\)?$/i,
@@ -175,18 +141,20 @@ function clean (segments) {
 }
 
 // ── Public ──────────────────────────────────────────────────────────────────
-async function transcribe (cfg, { wavPath, webmPath }, onProgress) {
+// onStatus gets short text for the menu bar ("Transcribing 40%"). Speaker
+// '0' is the left channel (you), '1' the right (the call).
+async function transcribe (cfg, { wavPath, webmPath }, onStatus) {
   if (cfg.resolvedTranscriber === 'local') {
-    const r = await localWhisper(cfg, wavPath, onProgress)
+    const r = await parakeet.transcribe(cfg, wavPath, onStatus)
     return { ...r, segments: clean(r.segments) }
   }
   if (cfg.resolvedTranscriber === 'api') {
-    const r = await apiWhisper(cfg, webmPath || wavPath, onProgress)
+    const r = await apiWhisper(cfg, webmPath || wavPath, (pct) => onStatus && onStatus(`Transcribing ${pct}%`))
     return { ...r, segments: clean(r.segments) }
   }
   throw new Error(
-    'No transcriber available. Either download a whisper.cpp model ' +
-    '(npm run fetch-model) or put OPENAI_API_KEY / GROQ_API_KEY in .env.'
+    'No transcriber available. Either install Parakeet (npm run fetch-model) ' +
+    'or put OPENAI_API_KEY / GROQ_API_KEY in .env.'
   )
 }
 

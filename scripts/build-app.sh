@@ -61,8 +61,7 @@ echo "==> Copying application code"
 RES="$APP/Contents/Resources/app"
 mkdir -p "$RES"
 cp -R "$APP_DIR/src" "$APP_DIR/package.json" "$APP_DIR/.env.example" \
-      "$APP_DIR/assets" "$APP_DIR/vendor" "$RES/"
-chmod +x "$RES/vendor/whisper-cli"
+      "$APP_DIR/assets" "$RES/"
 # Runtime dependencies only — Electron itself is the bundle.
 mkdir -p "$RES/node_modules"
 for dep in "$APP_DIR"/node_modules/*; do
@@ -102,9 +101,6 @@ find "$APP/Contents/Frameworks" \( -name "*.dylib" -o -name "*.node" \) -print0 
   while IFS= read -r -d '' lib; do
     codesign --force --sign "$SIGN_ID" --timestamp=none "$lib" 2>/dev/null || true
   done
-# The vendored whisper-cli is a standalone executable inside Resources; it
-# needs its own signature or Gatekeeper refuses to exec it.
-codesign --force --sign "$SIGN_ID" --timestamp=none "$RES/vendor/whisper-cli"
 codesign --force --sign "$SIGN_ID" --timestamp=none "$APP"
 codesign --verify --verbose=2 "$APP" 2>&1 | sed 's/^/    /'
 

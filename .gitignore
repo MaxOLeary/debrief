@@ -1,9 +1,9 @@
 node_modules/
 models/
 .impeccable/
-sketchybar/icon/DebriefIcons.ttf
 .env
 *.log
+log.txt
 *.gguf
 .lavish/
 .DS_Store

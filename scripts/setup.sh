@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One-shot setup on a fresh Mac: npm modules, then the two AI models. No
-# Homebrew, no accounts. whisper-cli ships in vendor/, llama.cpp and the audio
-# tools download or come with macOS.
+# One-shot setup on a fresh Mac: npm modules, then the two AI engines and
+# their models. No Homebrew, no accounts. sherpa-onnx (Parakeet) and llama.cpp
+# download themselves; the audio tools come with macOS.
 #
 #   ./scripts/setup.sh
 #
@@ -14,8 +14,8 @@ command -v node >/dev/null 2>&1 || { echo "Node.js is required: https://nodejs.o
 echo "==> Node modules"
 npm install --no-audit --no-fund
 
-echo "==> Whisper model (transcription)"
-bash scripts/fetch-model.sh "${WHISPER_MODEL_SIZE:-medium}"
+echo "==> Speech engine + model (transcription)"
+node scripts/fetch-model.js
 
 echo "==> Local AI engine + model (summaries)"
 node scripts/fetch-llm.js

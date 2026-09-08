@@ -60,9 +60,9 @@ function repairFragmentedMp4 (file) {
   }
 }
 
-// whisper.cpp wants 16 kHz 16-bit PCM. Both channels are kept: left = your
+// Parakeet wants 16 kHz 16-bit PCM. Both channels are kept: left = your
 // mic, right = everything the Mac played, which is how it tells you apart.
-async function toWhisperWav (input, output) {
+async function to16kWav (input, output) {
   try {
     await run(AFCONVERT, ['-f', 'WAVE', '-d', 'LEI16@16000', input, output])
   } catch (e) {
@@ -111,4 +111,4 @@ async function splitForUpload (ffmpeg, input, dir, segmentSeconds = 600) {
     .map(f => path.join(dir, f))
 }
 
-module.exports = { run, repairFragmentedMp4, toWhisperWav, toArchiveM4a, durationSeconds, splitForUpload }
+module.exports = { run, repairFragmentedMp4, to16kWav, toArchiveM4a, durationSeconds, splitForUpload }

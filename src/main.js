@@ -3,6 +3,14 @@ const {
   app, Tray, Menu, BrowserWindow, ipcMain, shell, dialog,
   Notification, desktopCapturer, session, systemPreferences, globalShortcut, nativeImage, screen
 } = require('electron')
+
+// One copy at a time. The LaunchAgent keeps Debrief running, so a second
+// launch (`open -n -a Debrief`, or an "open at login" toggle left on next to
+// the LaunchAgent) would otherwise mean two tray icons fighting over the
+// mic. The newcomer exits here, before the logger or config even load; the
+// running copy hears about it in 'second-instance' further down.
+if (!app.requestSingleInstanceLock()) app.exit(0)
+
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -13,6 +21,8 @@ const audio = require('./lib/audio')
 const transcribeLib = require('./lib/transcribe')
 const summarizeLib = require('./lib/summarize')
 const localllm = require('./lib/localllm')
+const parakeet = require('./lib/parakeet')
+const { progressLabel } = require('./lib/localengine')
 const note = require('./lib/note')
 const bridge = require('./lib/bridge')
 const appleNotes = require('./lib/apple-notes')
@@ -47,15 +57,38 @@ let cfg = configLib.load()
 let tray = null
 let recorderWindow = null
 
-// `electron . --selftest [seconds]` records for a few seconds, runs the whole
+// `electron . --selftest[=seconds]` records for a few seconds, runs the whole
 // pipeline, prints what happened, and quits. Used to prove capture works
-// without anyone touching the menu.
-const SELFTEST_SECONDS = (() => {
-  const i = process.argv.indexOf('--selftest')
-  if (i === -1) return null
-  const n = parseInt(process.argv[i + 1], 10)
-  return Number.isFinite(n) && n > 0 ? n : 12
-})()
+// without anyone touching the menu. A running app can be asked for the same
+// test (`echo "selftest 12" > ~/.config/debrief/command`, or
+// `open -n -a Debrief --args --selftest=12`); it then logs the result and
+// stays up. One token (`--selftest=12`) because a second launch arrives with
+// Electron's own switches spliced into argv.
+function selftestDuration (token) {
+  const n = parseInt(token, 10)
+  return n > 0 ? n : 12
+}
+function selftestSecondsFrom (argv) {
+  const flag = argv.find(a => /^--selftest(=|$)/.test(a))
+  return flag ? selftestDuration(flag.split('=')[1]) : null
+}
+let selftestSeconds = selftestSecondsFrom(process.argv)
+const quitAfterSelftest = selftestSeconds !== null // launched just for the test
+
+function startSelftest (n) {
+  if (state.phase !== 'idle') {
+    console.log(`[selftest] ignored — app is ${state.phase}`)
+    return
+  }
+  selftestSeconds = n
+  console.log(`[selftest] recording for ${n}s…`)
+  startRecording()
+}
+
+function finishSelftest (code) {
+  if (quitAfterSelftest) setTimeout(() => app.exit(code), 300)
+  else selftestSeconds = null
+}
 
 const state = {
   phase: 'idle',        // idle | recording | processing
@@ -263,16 +296,17 @@ function setPhase (phase, detail = '') {
 function showSetup () {
   const yes = (v) => (v ? '✓' : '✗')
   const llm = localllm.status(cfg)
+  const pk = parakeet.status(cfg)
   const lines = [
     `Config file:         ${cfg.envFile}`,
     `Notes folder:        ${cfg.notesDir}`,
     '',
     `${yes(cfg.ffmpeg)} ffmpeg:            ${cfg.ffmpeg || 'not installed (only needed for cloud transcription)'}`,
-    `${yes(cfg.whisperBin)} whisper.cpp:       ${cfg.whisperBin || 'not found'}`,
-    `${yes(cfg.whisperModel)} local model:       ${cfg.whisperModel || 'not found — run: npm run fetch-model'}`,
+    `${yes(pk.runtime)} speech engine:     ${pk.runtime ? `sherpa-onnx (${pk.runtime})` : 'downloads itself on launch'}`,
+    `${yes(pk.model)} speech model:      ${pk.model ? `${pk.label} (${pk.model.dir})` : 'downloads itself on launch'}`,
     '',
     `Transcription:       ${cfg.resolvedTranscriber === 'local'
-      ? 'whisper.cpp on this Mac (works offline)'
+      ? 'Parakeet on this Mac (works offline)'
       : cfg.resolvedTranscriber === 'api'
         ? (cfg.openaiKey ? 'OpenAI Whisper API' : 'Groq Whisper API')
         : 'NOT CONFIGURED'}`,
@@ -324,28 +358,30 @@ function notify (title, body, onClick) {
 }
 
 // ── Local AI first-run install ──────────────────────────────────────────────
-// The engine (~11 MB) and model (~2.5 GB) download themselves the first time
-// the app runs, with progress in the menu bar. If a meeting gets recorded
-// before that finishes, the summary step just waits for the same download.
+// The speech engine + model (~520 MB) and the summary engine + model
+// (~2.5 GB) download themselves the first time the app runs, with progress
+// in the menu bar. If a meeting gets recorded before that finishes, the
+// pipeline just waits for the same download.
 function prepareLocalLlm () {
-  const needWhisper = !(cfg.whisperModel && fs.existsSync(cfg.whisperModel))
+  const pk = parakeet.status(cfg)
   const s = localllm.status(cfg)
+  const needParakeet = !pk.ready && cfg.transcribeBackend !== 'api'
   const needLlm = cfg.resolvedSummarizer === 'local' && !s.ready
-  if (!needWhisper && !needLlm) { console.log(`[localllm] ready — ${s.model.label}`); return }
-  console.log(`[localllm] first run: fetching ${needWhisper ? 'speech model' : ''}${needWhisper && needLlm ? ' + ' : ''}${needLlm ? `engine + ${s.model.label}` : ''}`)
+  if (!needParakeet && !needLlm) { console.log(`[localllm] ready — ${pk.label} + ${s.model.label}`); return }
+  console.log(`[localllm] first run: fetching ${needParakeet ? 'speech engine + model' : ''}${needParakeet && needLlm ? ' + ' : ''}${needLlm ? `engine + ${s.model.label}` : ''}`)
 
   let lastLogged = -10
   const onProgress = (prog) => {
-    state.install = localllm.progressLabel(prog)
+    state.install = progressLabel(prog)
     if (prog.pct - lastLogged >= 10 || prog.pct < lastLogged) { lastLogged = prog.pct; console.log(`[localllm] ${state.install}`) }
     if (state.phase === 'idle') refresh()
   }
 
   ;(async () => {
-    if (needWhisper) {
-      await localllm.ensureWhisper(cfg, onProgress)
-      cfg = configLib.load() // pick up the model file that now exists
-      console.log(`[localllm] speech model ready — ${cfg.whisperModel}`)
+    if (needParakeet) {
+      const done = await parakeet.ensure(cfg, onProgress)
+      cfg = configLib.load() // re-resolve the transcription route now that local exists
+      console.log(`[localllm] speech engine ready — ${done.label}`)
     }
     if (needLlm) await localllm.ensure(cfg, onProgress)
   })().then(() => {
@@ -433,14 +469,15 @@ async function processRecording () {
 
     setPhase('processing', 'Converting…')
     const wavPath = path.join(tempDir, 'audio16k.wav')
-    await audio.toWhisperWav(webmPath, wavPath)
+    await audio.to16kWav(webmPath, wavPath)
     audio.toArchiveM4a(webmPath, slot.audio) // moves the recording into place
     const seconds = await audio.durationSeconds(wavPath)
 
+    // On a first launch this also waits for the speech model download.
     setPhase('processing', 'Transcribing…')
     const { segments, engine } = await transcribeLib.transcribe(
       cfg, { wavPath, webmPath: slot.audio },
-      (pct) => setPhase('processing', `Transcribing ${pct}%`)
+      (text) => setPhase('processing', text)
     )
 
     // Only trust the left/right speaker split when both sides were actually live.
@@ -497,7 +534,7 @@ async function processRecording () {
       () => openNote(slot.markdown)
     )
 
-    if (SELFTEST_SECONDS) {
+    if (selftestSeconds) {
       console.log('SELFTEST_RESULT ' + JSON.stringify({
         ok: true,
         mic: state.sources.mic,
@@ -510,16 +547,16 @@ async function processRecording () {
         audio: slot.audio,
         summaryError
       }))
-      setTimeout(() => app.exit(0), 300)
+      finishSelftest(0)
     }
   } catch (e) {
     console.error('[pipeline] failed:', e)
     state.lastError = e.message
     hidePanel()
     setPhase('idle')
-    if (SELFTEST_SECONDS) {
+    if (selftestSeconds) {
       console.log('SELFTEST_RESULT ' + JSON.stringify({ ok: false, error: e.message, raw: webmPath }))
-      setTimeout(() => app.exit(1), 300)
+      finishSelftest(1)
       return
     }
     notify('Debrief failed', e.message)
@@ -647,7 +684,7 @@ ipcMain.on('recorder:started', (_e, info) => {
   state.startedAt = Date.now()
   showPanel() // the waveform card appears once audio is actually flowing
   refresh()
-  if (SELFTEST_SECONDS) setTimeout(() => stopRecording(), SELFTEST_SECONDS * 1000)
+  if (selftestSeconds) setTimeout(() => stopRecording(), selftestSeconds * 1000)
   console.log(`[recorder] started — mic:${info.mic} system:${info.system}`)
   if (info.warnings && info.warnings.length) {
     console.warn('[recorder] warnings:', info.warnings.join(' | '))
@@ -686,9 +723,9 @@ ipcMain.on('recorder:error', (_e, msg) => {
   hidePanel()
   cleanupRecordingState()
   setPhase('idle')
-  if (SELFTEST_SECONDS) {
+  if (selftestSeconds) {
     console.log('SELFTEST_RESULT ' + JSON.stringify({ ok: false, error: msg }))
-    setTimeout(() => app.exit(1), 300)
+    finishSelftest(1)
     return
   }
   dialog.showMessageBox({
@@ -700,13 +737,20 @@ ipcMain.on('recorder:error', (_e, msg) => {
   })
 })
 
+// A second launch handed us its argv (see the single-instance lock at the top).
+app.on('second-instance', (_e, argv) => {
+  console.log(`[main] second launch — argv: ${argv.slice(1).join(' ')}`)
+  const n = selftestSecondsFrom(argv)
+  if (n) startSelftest(n)
+})
+
 app.whenReady().then(async () => {
   if (app.dock) app.dock.hide() // menu bar only, no Dock icon
 
   // Answer the renderer's getDisplayMedia call with the whole screen plus the
   // system audio loopback. Nothing is written from the video side.
   console.log(`[main] Debrief starting — argv: ${process.argv.slice(1).join(' ')}`)
-  console.log(`[main] transcriber: ${cfg.resolvedTranscriber} | model: ${cfg.whisperModel} | summarizer: ${cfg.resolvedSummarizer}`)
+  console.log(`[main] transcriber: ${cfg.resolvedTranscriber} | model: ${parakeet.status(cfg).label || 'not installed yet'} | summarizer: ${cfg.resolvedSummarizer}`)
   console.log('[main] screen access:', systemPreferences.getMediaAccessStatus('screen'),
               '| mic access:', systemPreferences.getMediaAccessStatus('microphone'))
 
@@ -737,12 +781,9 @@ app.whenReady().then(async () => {
   prepareLocalLlm()
   setInterval(() => { if (state.phase === 'recording') refresh() }, 1000)
 
-  if (SELFTEST_SECONDS) {
-    console.log(`[selftest] recording for ${SELFTEST_SECONDS}s…`)
-    // The stop timer is armed by the recorder:started handler, so a slow
-    // permission grant doesn't eat into the test window.
-    setTimeout(() => startRecording(), 1200)
-  }
+  // The stop timer is armed by the recorder:started handler, so a slow
+  // permission grant doesn't eat into the test window.
+  if (selftestSeconds) setTimeout(() => startSelftest(selftestSeconds), 1200)
 
   if (cfg.globalShortcut) {
     globalShortcut.register(cfg.globalShortcut, () => {
@@ -761,6 +802,8 @@ app.whenReady().then(async () => {
       if (state.phase === 'idle') startRecording()
     } else if (cmd === 'stop') {
       if (state.phase === 'recording') stopRecording()
+    } else if (/^selftest(\s|$)/.test(cmd)) {
+      startSelftest(selftestDuration(cmd.split(/\s+/)[1]))
     } else if (cmd === 'discard') {
       // Scripted callers are deliberate — no confirmation dialog here.
       if (state.phase === 'recording') discardRecording()

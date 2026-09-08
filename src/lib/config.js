@@ -63,43 +63,12 @@ function load () {
 
   const notesDir = expandHome(get('NOTES_DIR', path.join(os.homedir(), 'Debrief')))
 
-  // The repo ships its own whisper-cli (vendor/, a static arm64 build of
-  // whisper.cpp), so nothing has to be installed. Homebrew's copy is a fallback.
-  const whisperBin = expandHome(get('WHISPER_BIN')) || firstExisting([
-    process.arch === 'arm64' ? path.join(APP_ROOT, 'vendor', 'whisper-cli') : null,
-    '/opt/homebrew/bin/whisper-cli',
-    '/usr/local/bin/whisper-cli',
-    '/opt/homebrew/bin/whisper-cpp',
-    '/usr/local/bin/whisper-cpp'
-  ])
-
-  // Models live under ~/.config, never inside the repo: this tree sits on the
-  // Desktop, which is iCloud-synced, and a 1.5 GB model has no business there.
-  const modelHome = path.join(os.homedir(), '.config', 'debrief', 'models')
-  const modelPref = expandHome(get('WHISPER_MODEL'))
-  const whisperModel = firstExisting([
-    modelPref && (path.isAbsolute(modelPref) ? modelPref : path.join(APP_ROOT, modelPref)),
-    path.join(modelHome, 'ggml-medium.bin'),
-    path.join(modelHome, 'ggml-small.bin'),
-    path.join(os.homedir(), '.cache', 'whisper', 'ggml-medium.bin'),
-    // Fall back to the model the dictation app already downloaded.
-    path.join(os.homedir(), '.config', 'dictation', 'models', 'ggml-small.en.bin'),
-    '/opt/homebrew/share/whisper-cpp/ggml-medium.bin'
-  ])
-
-  // Silero VAD (~860 KB). Without it, whisper.cpp invents dialogue during
-  // silence — a quiet meeting comes back as a repeated hallucinated phrase.
-  const vadPref = expandHome(get('VAD_MODEL'))
-  const vadModel = get('USE_VAD', '1') === '0' ? null : firstExisting([
-    vadPref,
-    path.join(modelHome, 'ggml-silero-v5.1.2.bin'),
-    path.join(modelHome, 'ggml-silero-v5.1.bin')
-  ])
+  // GLOBAL_SHORTCUT=none turns the hotkey off. An empty value can't: for
+  // every variable here, empty means "use the default".
+  const shortcut = get('GLOBAL_SHORTCUT', 'Command+Shift+R')
 
   const cfg = {
     appRoot: APP_ROOT,
-    vadModel,
-    modelHome,
     notesDir,
     // What the "Edit Configuration" menu item opens. Never inside the bundle.
     envFile: IS_PACKAGED ? USER_ENV_FILE : path.join(APP_ROOT, '.env'),
@@ -117,13 +86,15 @@ function load () {
     // first launch into ~/.config/debrief (see lib/localllm.js).
     llmModel: get('LLM_MODEL', ''),                    // qwen3-4b | qwen2.5-3b | llama3.2-3b | /path/to/x.gguf
     llamaServerBin: expandHome(get('LLAMA_SERVER_BIN')), // only if you built llama.cpp yourself
-    localLlmHome: USER_CONFIG_DIR,
 
+    // Local transcription is NVIDIA Parakeet TDT through sherpa-onnx, the
+    // engine UltraWhisper runs. It downloads itself on first use into
+    // ~/.config/debrief (or borrows UltraWhisper's identical copies).
     transcribeBackend: get('TRANSCRIBE_BACKEND', 'auto'),
-    whisperBin,
-    whisperModel,
-    whisperThreads: parseInt(get('WHISPER_THREADS', String(Math.max(4, os.cpus().length - 2))), 10),
-    whisperLanguage: get('WHISPER_LANGUAGE', 'en'),
+    parakeetModel: expandHome(get('PARAKEET_MODEL')),  // folder name under models/, or a path to one
+    transcribeThreads: parseInt(get('TRANSCRIBE_THREADS', get('WHISPER_THREADS', String(Math.max(2, os.cpus().length - 2)))), 10),
+    // Parakeet v3 hears 25 languages on its own; this only steers the cloud route.
+    transcribeLanguage: get('TRANSCRIBE_LANGUAGE', get('WHISPER_LANGUAGE', 'en')),
 
     // Claude Code's headless mode runs on the subscription Max already pays
     // for, so it costs nothing extra. Note this must be the real binary — the
@@ -136,7 +107,7 @@ function load () {
 
     // Optional. Only the cloud-transcription path needs it (to slice long
     // uploads); recording, conversion and local transcription use macOS's
-    // own afconvert/afinfo and the vendored whisper-cli.
+    // own afconvert/afinfo and sherpa-onnx.
     ffmpeg: expandHome(get('FFMPEG_BIN')) || firstExisting([
       '/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg'
     ]),
@@ -167,15 +138,18 @@ function load () {
     micGain: parseFloat(get('MIC_GAIN', '1.0')),
     systemGain: parseFloat(get('SYSTEM_GAIN', '1.0')),
     keepVideoTrack: get('KEEP_VIDEO_TRACK', '0') === '1',
-    globalShortcut: get('GLOBAL_SHORTCUT', 'Command+Shift+R')
+    globalShortcut: shortcut === 'none' ? null : shortcut
   }
 
-  // Which transcription route will actually run?
-  const canLocal = Boolean(cfg.whisperBin && cfg.whisperModel)
+  // Which transcription route will actually run? Parakeet installs itself on
+  // first use, so "local" is always possible on a Mac; auto only prefers an
+  // API key over it while the download hasn't happened yet.
+  const canLocal = process.platform === 'darwin'
+  const haveLocal = canLocal && require('./parakeet').status(cfg).ready
   const canApi = Boolean(cfg.openaiKey || cfg.groqKey)
   if (cfg.transcribeBackend === 'local') cfg.resolvedTranscriber = canLocal ? 'local' : 'none'
   else if (cfg.transcribeBackend === 'api') cfg.resolvedTranscriber = canApi ? 'api' : 'none'
-  else cfg.resolvedTranscriber = canLocal ? 'local' : (canApi ? 'api' : 'none')
+  else cfg.resolvedTranscriber = haveLocal ? 'local' : canApi ? 'api' : canLocal ? 'local' : 'none'
 
   // Which summariser will actually run?
   const p = cfg.summaryProvider
