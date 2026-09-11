@@ -2,32 +2,38 @@
 <meta charset="utf-8">
 <title>Debrief visualizer</title>
 <style>
-  /* The window is transparent; the card floats inside it with a CSS shadow
-     (native shadows ghost on transparent Electron windows when the canvas
-     repaints). Same geometry as UltraWhisper's card: 428x120, radius 32.
-     UltraWhisper frosts the card with a system blur; Electron can't clip
-     that blur to a 32px corner, so this card is a plain dark wash. */
-  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden;
-               font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-               -webkit-user-select: none; user-select: none; }
-  #card {
-    position: absolute; left: 12px; top: 12px; width: 428px; height: 120px;
-    border-radius: 32px;
-    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
-    box-sizing: border-box;
-    -webkit-app-region: drag;          /* grab anywhere on the card and drag */
+  /* Window is exactly the 428x120 pill. A CSS mask on <html> is what actually
+     clips compositor layers on a transparent Electron window; overflow,
+     clip-path, and canvas all paint past the 32px corners. Native window
+     shadow follows the opaque region, so no CSS box-shadow (that haloed). */
+  html, body {
+    margin: 0; width: 428px; height: 120px; background: transparent; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-user-select: none; user-select: none;
   }
-  /* Inner clip so the wave can't paint through the 32px corners. Overflow
-     can't live on #card: that would clip the drop shadow too. */
-  #clip {
+  html {
+    -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='428' height='120'><rect width='428' height='120' rx='32' ry='32' fill='black'/></svg>");
+    -webkit-mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+  }
+  #card {
     position: absolute; inset: 0;
     border-radius: 32px;
     overflow: hidden;
-    background: rgba(22, 22, 24, 0.88);
+    background: rgba(22, 22, 24, 0.92);
     border: 1px solid rgba(255, 255, 255, 0.09);
     box-sizing: border-box;
+    -webkit-app-region: drag;
   }
-  #wave { position: absolute; left: 24px; top: 14px; width: 380px; height: 62px; }
+  #wave {
+    position: absolute; left: 24px; top: 14px; width: 380px; height: 62px;
+    display: flex; align-items: center; justify-content: center;
+    gap: 1.5px; overflow: hidden;
+  }
+  #wave i {
+    flex: none; width: 1.5px; height: 1.6px; border-radius: 0.75px;
+    background: #fff; opacity: 0.3;
+  }
   #prompt {
     position: absolute; left: 0; top: 26px; width: 100%; text-align: center;
     color: rgba(255, 255, 255, 0.9); font-size: 15px; font-weight: 500;
@@ -61,8 +67,7 @@
 </style>
 <body>
 <div id="card">
-<div id="clip">
-  <canvas id="wave"></canvas>
+  <div id="wave"></div>
   <div id="prompt">Discard recording? <span class="keycap inline">↩</span></div>
   <div id="done"></div>
   <div id="footer">
@@ -79,29 +84,29 @@
     <span id="footerRight"></span>
   </div>
 </div>
-</div>
 <script>
 'use strict'
-// A faithful port of UltraWhisper's WaveView: a ticker of thin bars mirrored
-// around the centerline while recording (silence reads as a dotted line), and
-// a soft breathing spindle while the pipeline works.
+// Same wave as UltraWhisper: a ticker of thin bars mirrored around the
+// centerline while recording (silence reads as a dotted line), and a soft
+// breathing spindle while the pipeline works. Bar height is set directly:
+// scaleY promotes a compositor layer that paints past the pill.
 
-const canvas = document.getElementById('wave')
+const waveEl = document.getElementById('wave')
 const promptEl = document.getElementById('prompt')
 const doneEl = document.getElementById('done')
 const footer = document.getElementById('footer')
 const footerText = document.getElementById('footerText')
 const footerRight = document.getElementById('footerRight')
 
-const PITCH = 3, BAR_W = 1.5
-const dpr = window.devicePixelRatio || 1
-canvas.width = canvas.clientWidth * dpr
-canvas.height = canvas.clientHeight * dpr
-const ctx = canvas.getContext('2d')
-ctx.scale(dpr, dpr)
-const W = canvas.clientWidth
-const H = canvas.clientHeight
+const PITCH = 3, BAR_W = 1.5, BAR_MIN = 1.6
+const W = 380, H = 62
 const SLOTS = Math.max(2, Math.floor(W / PITCH))
+const barEls = []
+for (let i = 0; i < SLOTS; i++) {
+  const el = document.createElement('i')
+  waveEl.appendChild(el)
+  barEls.push(el)
+}
 
 let mode = 'wave'          // wave | discard | busy | done
 let hotkeyCaps = ['⌘', '⇧', 'R']
@@ -119,7 +124,6 @@ function keycapsFor (hotkey) {
 }
 
 function setFooterRight (items) {
-  // items: array of { label } or { cap } or { label, action } / { cap, action }
   footerRight.textContent = ''
   for (const it of items) {
     let el
@@ -140,14 +144,14 @@ function setFooterRight (items) {
 const doStop = () => window.panel.send('panel:stop')
 const doDiscard = () => window.panel.send('panel:discard')
 const doHide = () => window.panel.send('panel:hide')
-const showPrompt = () => setMode('discard')
-const backToWave = () => setMode('wave')
+const showPrompt = () => window.panel.send('panel:ask-discard')
+const backToWave = () => window.panel.send('panel:keep')
 
 function setMode (m, opts = {}) {
   mode = m
   promptEl.style.display = m === 'discard' ? 'block' : 'none'
   doneEl.style.display = m === 'done' ? 'block' : 'none'
-  canvas.style.display = (m === 'wave' || m === 'busy') ? 'block' : 'none'
+  waveEl.style.display = (m === 'wave' || m === 'busy') ? 'flex' : 'none'
   footer.className = m === 'busy' ? 'dim' : ''
 
   if (m === 'wave') {
@@ -177,7 +181,6 @@ function setMode (m, opts = {}) {
 }
 
 function draw () {
-  ctx.clearRect(0, 0, W, H)
   const levels = new Array(SLOTS).fill(0)
 
   if (mode === 'wave') {
@@ -199,30 +202,23 @@ function draw () {
       const d = (i / (SLOTS - 1) - c) / w
       levels[i] = 0.62 * Math.exp(-d * d)
     }
+  } else {
+    raf = requestAnimationFrame(draw)
+    return
   }
 
-  const mid = H / 2
-  const totalW = SLOTS * PITCH - (PITCH - BAR_W)
-  const x0 = W / 2 - totalW / 2
   for (let i = 0; i < SLOTS; i++) {
     const lv = levels[i]
-    const h = Math.max(1.6, lv * H)
-    const alpha = h <= 1.6 ? 0.30
+    const h = Math.max(BAR_MIN, lv * H)
+    const alpha = h <= BAR_MIN ? 0.30
       : mode === 'busy' ? 0.65
       : 0.40 + 0.60 * Math.min(1, lv * 1.5)
-    ctx.fillStyle = `rgba(255,255,255,${alpha})`
-    roundRect(x0 + i * PITCH, mid - h / 2, BAR_W, h, BAR_W / 2)
+    barEls[i].style.height = h + 'px'
+    barEls[i].style.opacity = alpha
   }
   raf = requestAnimationFrame(draw)
 }
 
-function roundRect (x, y, w, h, r) {
-  ctx.beginPath()
-  ctx.roundRect(x, y, w, h, r)
-  ctx.fill()
-}
-
-// ── Wiring ──────────────────────────────────────────────────────────────────
 window.panel.onLevel((v) => { currentLevel = v })
 
 window.panel.onState((s) => {
@@ -238,7 +234,7 @@ window.addEventListener('keydown', (e) => {
     if (mode === 'wave') showPrompt()
     else if (mode === 'discard') backToWave()
     else doHide()
-  } else if (e.key === 'Enter' && mode === 'discard') {
+  } else if ((e.key === 'Enter' || e.key === 'Return') && mode === 'discard') {
     doDiscard()
   }
 })

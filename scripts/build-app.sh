@@ -24,6 +24,9 @@ trap 'rm -rf "$STAGE"' EXIT
 ELECTRON_APP="$APP_DIR/node_modules/electron/dist/Electron.app"
 [ -d "$ELECTRON_APP" ] || { echo "Electron not installed. Run: npm install"; exit 1; }
 
+echo "==> Building window-shape addon"
+bash "$APP_DIR/scripts/build-shapewindow.sh"
+
 echo "==> Copying Electron runtime"
 ditto "$ELECTRON_APP" "$APP"
 
@@ -98,6 +101,10 @@ find "$APP/Contents/Frameworks" -name "*.app" -maxdepth 1 -print0 2>/dev/null |
     codesign --force --sign "$SIGN_ID" --timestamp=none "$helper" 2>/dev/null || true
   done
 find "$APP/Contents/Frameworks" \( -name "*.dylib" -o -name "*.node" \) -print0 2>/dev/null |
+  while IFS= read -r -d '' lib; do
+    codesign --force --sign "$SIGN_ID" --timestamp=none "$lib" 2>/dev/null || true
+  done
+find "$RES" -name "*.node" -print0 2>/dev/null |
   while IFS= read -r -d '' lib; do
     codesign --force --sign "$SIGN_ID" --timestamp=none "$lib" 2>/dev/null || true
   done

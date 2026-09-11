@@ -288,7 +288,7 @@ function setPhase (phase, detail = '') {
   // Keep the visualizer card in step: it shows the breathing spindle plus
   // live progress text ("Transcribing 40%") for as long as it's on screen.
   if (phase === 'processing' && panelWindow && panelWindow.isVisible()) {
-    panelSend({ mode: 'busy', detail })
+    setPanelUi('busy', { detail })
   }
   refresh()
 }
@@ -432,6 +432,7 @@ function discardRecording ({ confirm = false } = {}) {
   const go = () => {
     if (state.phase !== 'recording') return // stopped some other way meanwhile
     state.discard = true
+    hidePanel()
     setPhase('processing', 'Discarding…')
     recorderWindow.webContents.send('recorder:stop')
   }
@@ -523,7 +524,7 @@ async function processRecording () {
     state.lastAudio = slot.audio
     state.lastError = summaryError || null
     if (panelWindow && panelWindow.isVisible()) {
-      panelSend({ mode: 'done', text: `✓ ${path.basename(slot.markdown)} — ${note.humanDuration(seconds)}` })
+      setPanelUi('done', { text: `✓ ${path.basename(slot.markdown)} — ${note.humanDuration(seconds)}` })
       setTimeout(hidePanel, 2500)
     }
     setPhase('idle')
@@ -579,10 +580,11 @@ async function processRecording () {
 // The floating waveform card (same look as UltraWhisper): live bars while
 // recording, a breathing spindle while the pipeline works, and an inline
 // "Discard recording?" prompt on Esc/Cancel. Drag it anywhere; it remembers.
-const PANEL_W = 452
-const PANEL_H = 144
+const PANEL_W = 428
+const PANEL_H = 120
 const PANEL_POS_FILE = path.join(os.homedir(), '.config', 'debrief', 'panel.json')
 let panelWindow = null
+let panelUi = 'hidden' // hidden | wave | discard | busy | done
 
 function createPanelWindow () {
   panelWindow = new BrowserWindow({
@@ -591,12 +593,16 @@ function createPanelWindow () {
     show: false,
     frame: false,
     transparent: true,
+    backgroundColor: '#00000000',
+    type: 'panel',
+    roundedCorners: false, // we draw a 32px pill; system corners are ~10px
     resizable: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
-    hasShadow: false, // the card draws its own CSS shadow
+    hasShadow: true, // follows the masked opaque pill, same as UltraWhisper
+    acceptFirstMouse: true,
     webPreferences: {
       preload: path.join(__dirname, 'panel-preload.js'),
       contextIsolation: true,
@@ -606,6 +612,9 @@ function createPanelWindow () {
   panelWindow.setAlwaysOnTop(true, 'status')
   panelWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   panelWindow.loadFile('src/visualizer.html')
+  panelWindow.webContents.on('did-finish-load', () => {
+    shapePanelWindow()
+  })
   panelWindow.on('moved', () => {
     try {
       fs.mkdirSync(path.dirname(PANEL_POS_FILE), { recursive: true })
@@ -634,20 +643,75 @@ function panelSend (s) {
   if (panelWindow && !panelWindow.isDestroyed()) panelWindow.webContents.send('panel:state', s)
 }
 
+// CSS cannot clip the NSWindow. Without this the window is a rectangle and
+// macOS draws a low-opacity square border around the 32px pill.
+function shapePanelWindow () {
+  if (process.platform !== 'darwin' || !panelWindow || panelWindow.isDestroyed()) return
+  try {
+    const addon = require('./native/shapewindow.node')
+    const ok = addon.shape(panelWindow.getNativeWindowHandle(), 32)
+    panelWindow.setHasShadow(false)
+    panelWindow.setHasShadow(true)
+    console.log(`[main] panel window shaped: ${ok}`)
+  } catch (e) {
+    console.warn('[main] could not shape panel window:', e.message)
+  }
+}
+
+function setPanelUi (mode, extra = {}) {
+  panelUi = mode
+  if (mode !== 'hidden') panelSend({ mode, hotkey: cfg.globalShortcut, ...extra })
+  syncPanelKeys()
+}
+
+function syncPanelKeys () {
+  // Esc/Enter have to live in the main process: the card is a nonactivating
+  // panel shown with showInactive(), so renderer keydown never fires.
+  for (const k of ['Esc', 'Enter']) {
+    try { globalShortcut.unregister(k) } catch { /* not registered */ }
+  }
+  if (panelUi === 'hidden') return
+  if (!globalShortcut.register('Esc', onPanelEsc)) {
+    console.warn('[main] could not register Esc while the card is up')
+  }
+  if (panelUi === 'discard' && !globalShortcut.register('Enter', onPanelEnter)) {
+    console.warn('[main] could not register Enter while the discard prompt is up')
+  }
+}
+
+function onPanelEsc () {
+  if (panelUi === 'wave') setPanelUi('discard')
+  else if (panelUi === 'discard') setPanelUi('wave')
+  else hidePanel()
+}
+
+function onPanelEnter () {
+  if (panelUi === 'discard') discardRecording()
+}
+
 function showPanel () {
   if (!panelWindow || panelWindow.isDestroyed()) return
   placePanel()
-  panelSend({ mode: 'wave', hotkey: cfg.globalShortcut })
   panelWindow.showInactive() // never steal focus when a meeting starts
+  shapePanelWindow()
+  setPanelUi('wave')
 }
 
 function hidePanel () {
   if (panelWindow && !panelWindow.isDestroyed() && panelWindow.isVisible()) panelWindow.hide()
+  panelUi = 'hidden'
+  syncPanelKeys()
 }
 
 ipcMain.on('panel:stop', () => stopRecording())
 ipcMain.on('panel:discard', () => discardRecording())
 ipcMain.on('panel:hide', () => hidePanel())
+ipcMain.on('panel:ask-discard', () => {
+  if (state.phase === 'recording') setPanelUi('discard')
+})
+ipcMain.on('panel:keep', () => {
+  if (panelUi === 'discard') setPanelUi('wave')
+})
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
 function createRecorderWindow () {
@@ -678,6 +742,10 @@ ipcMain.on('recorder:level', (_e, level) => {
 })
 
 ipcMain.on('recorder:started', (_e, info) => {
+  if (state.phase !== 'recording') {
+    console.log('[recorder] started after stop — ignoring')
+    return
+  }
   state.sources = { mic: info.mic, system: info.system }
   // Granting screen capture can take a few seconds, so the real clock starts
   // here — otherwise the menu bar timer counts time nothing was recorded.
@@ -744,8 +812,31 @@ app.on('second-instance', (_e, argv) => {
   if (n) startSelftest(n)
 })
 
+function onRecordHotkey () {
+  if (state.phase === 'idle') {
+    startRecording()
+    return
+  }
+  if (state.phase === 'recording') {
+    // The card only appears once audio is flowing. A second press (or key
+    // repeat) before that would stop an empty take and look like "the hotkey
+    // does nothing."
+    if (!panelWindow || panelWindow.isDestroyed() || !panelWindow.isVisible()) {
+      console.log('[main] hotkey ignored — recording is still starting')
+      return
+    }
+    stopRecording()
+  }
+}
+
 app.whenReady().then(async () => {
   if (app.dock) app.dock.hide() // menu bar only, no Dock icon
+
+  // Electron's default menu binds Cmd+Shift+R to Force Reload, which is our
+  // record hotkey. A tray app doesn't need that menu.
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: app.name, submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] }
+  ]))
 
   // Answer the renderer's getDisplayMedia call with the whole screen plus the
   // system audio loopback. Nothing is written from the video side.
@@ -786,10 +877,8 @@ app.whenReady().then(async () => {
   if (selftestSeconds) setTimeout(() => startSelftest(selftestSeconds), 1200)
 
   if (cfg.globalShortcut) {
-    globalShortcut.register(cfg.globalShortcut, () => {
-      if (state.phase === 'recording') stopRecording()
-      else if (state.phase === 'idle') startRecording()
-    })
+    const ok = globalShortcut.register(cfg.globalShortcut, onRecordHotkey)
+    console.log(`[main] ${cfg.globalShortcut}: ${ok ? 'registered' : 'FAILED — already in use'}`)
   }
 
   // Same actions the tray menu offers, reachable from a shell script.
